@@ -69,7 +69,7 @@ def main():
             if not clients:
                 continue
 
-            readable_connections, _, _ = select.select(clients, [], [], CLIENT_MESSAGE_TIMEOUT)
+            readable_connections, _, _ = select.select(clients, [], [], POLL_TIMEOUT)
             connection_data = []
             for client_socket in clients:
                 if client_socket in readable_connections:
@@ -80,10 +80,6 @@ def main():
                         log_connection(client_socket, f"An error has occurred: {err}")
                         close_connection(clients, client_socket)
                         readable_connections.remove(client_socket)
-
-                else:
-                    log_connection(client_socket, f"{CLIENT_MESSAGE} timed out. Closing connection.")
-                    close_connection(clients, client_socket)
 
             for index, data in enumerate(connection_data):
                 log_connection(readable_connections[index], f"Received message: {data}")
