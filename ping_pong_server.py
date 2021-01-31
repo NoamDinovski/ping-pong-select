@@ -11,7 +11,8 @@ Created: 28/01/2020
 
 import select
 import socket
-import sys
+
+import poller
 
 ANY_INTERFACE = ""
 PORT = 1337
@@ -50,31 +51,15 @@ def close_connection(connections, connection_socket):
     connection_socket.close()
     connections.remove(connection_socket)
 
+
 def is_poll_object_supported():
     return getattr(select, "poll", None) is not None
 
-def select_for_read(sockets, timeout):
-    length = len(sockets)
-    reads = []
-    while length > 0:
-        reads_temp, _, _ = select.select(sockets[max(0, length - MAX_FDS):length], [], [], timeout)
-        reads += reads_temp
-        length -= MAX_FDS
-    return reads
 
-
-def poll_for_read(poll_object, timeout):
-    poll_object.poll()
-
-
-def select_for_write(sockets, timeout):
-    length = len(sockets)
-    writes = []
-    while length > 0:
-        _, writes_temp, _ = select.select([], sockets[max(0, length - MAX_FDS):length], [], timeout)
-        writes += writes_temp
-        length -= MAX_FDS
-    return writes
+def get_poller():
+    if is_poll_object_supported():
+        return poller.PollPoller()
+    return poller.SelectPoller(MAX_FDS)
 
 
 def main():
@@ -86,13 +71,12 @@ def main():
 
         clients = []
 
-        use_poll = is_poll_object_supported()
-
-        if use_poll:
-            poll = select.poll()
+        current_poller = get_poller()
 
         while True:
-            readable = select_for_read([sock], POLL_TIMEOUT)
+            current_poller.register([sock])
+            readable = current_poller.poll_for_reading(POLL_TIMEOUT)
+            current_poller.unregister([sock])
             if readable:
                 client_socket = sock.accept()[0]
                 print(f"Accepted connection from {client_socket.getpeername()} "
@@ -103,33 +87,37 @@ def main():
             if not clients:
                 continue
 
-            readable_connections = select_for_read(clients, POLL_TIMEOUT)
+            current_poller.register(clients)
+            readable_connections = current_poller.poll_for_reading(POLL_TIMEOUT)
+            current_poller.unregister(clients)
             connection_data = []
-            for client_socket in clients:
-                if client_socket in readable_connections:
-                    try:
-                        data = client_socket.recv(BUFFER_SIZE).decode()
-                        connection_data.append(data)
-                    except OSError as err:
-                        log_connection(client_socket, f"An error has occurred: {err}")
-                        close_connection(clients, client_socket)
-                        readable_connections.remove(client_socket)
+            for connection in readable_connections:
+                try:
+                    data = connection.recv(BUFFER_SIZE).decode().strip()
+                    connection_data.append(data)
+                except OSError as err:
+                    log_connection(client_socket, f"An error has occurred: {err}")
+                    close_connection(clients, connection)
+                    readable_connections.remove(connection)
 
-            connections_to_pop = []
+            if not readable_connections:
+                continue
+
+            invalid_message_connections = []
 
             for index, data in enumerate(connection_data):
                 log_connection(readable_connections[index], f"Received message: {data}")
                 if data != CLIENT_MESSAGE:
                     log_connection(readable_connections[index], f"Invalid message. Closing connection.")
                     close_connection(clients, readable_connections[index])
-                    connections_to_pop.append(readable_connections[index])
+                    invalid_message_connections.append(readable_connections[index])
 
-            readable_connections = [conn for conn in readable_connections if conn not in connections_to_pop]
+            for connection in invalid_message_connections:
+                readable_connections.remove(connection)
 
-            if not readable_connections:
-                continue
-
-            writable_connections = select_for_write(readable_connections, POLL_TIMEOUT)
+            current_poller.register(readable_connections)
+            writable_connections = current_poller.poll_for_writing(POLL_TIMEOUT)
+            current_poller.unregister(readable_connections)
             for client_socket in writable_connections:
                 log_connection(client_socket, f"Sending back {SERVER_REPLY}")
                 try:
